@@ -42,6 +42,9 @@ except ImportError:
 
 # ── Parches a pyVoIP ──────────────────────────────────────────────────────────
 
+# Dict global: call_id → callable(status_code: int) para supervisar REFER/NOTIFY
+_refer_callbacks: dict = {}
+
 # 1) parse_message: responde a OPTIONS + termina llamadas en 4xx/5xx no manejados.
 #    pyVoIP ignora OPTIONS con un "TODO: Add 400 Error" y no responde.
 #    Además, solo maneja 200/404/503 como respuestas a INVITE; 488 y otros
@@ -54,6 +57,33 @@ def _patched_parse_message(self, message):
         ok = self.gen_ok(message)
         self.out.sendto(ok.encode("utf8"), (self.server, self.port))
         return
+
+    # NOTIFY para supervisión de transferencias (REFER)
+    if (message.type == _pv_sip.SIPMessageType.MESSAGE
+            and message.method == "NOTIFY"):
+        event = str(message.headers.get("Event", "")).lower()
+        if "refer" in event:
+            try:
+                ok = self.gen_ok(message)
+                self.out.sendto(ok.encode("utf8"), (self.server, self.port))
+            except Exception as _ne:
+                logger.debug(f"Error respondiendo NOTIFY refer: {_ne}")
+            call_id = message.headers.get("Call-ID", "")
+            try:
+                raw_body = getattr(message, "body", None) or b""
+                body = raw_body.decode("utf-8", errors="replace") if isinstance(raw_body, bytes) else str(raw_body)
+            except Exception:
+                body = ""
+            import re as _re_n
+            m = _re_n.search(r"SIP/2\.0\s+(\d+)", body)
+            if m:
+                code = int(m.group(1))
+                logger.info(f"NOTIFY refer: Call-ID={call_id} status={code}")
+                cb = _refer_callbacks.get(call_id)
+                if cb:
+                    cb(code)
+            return
+
     status = getattr(message, "status", None)
     method = getattr(message, "method", None)
     logger.info(f"parse_message recibido: method={method} status={status}")
@@ -513,6 +543,8 @@ class SIPClient:
         self.on_status_change: Optional[Callable[[Status], None]] = None
         self.on_incoming_call: Optional[Callable[[str], None]] = None  # caller_id
         self.on_call_ended: Optional[Callable[[], None]] = None
+        # on_transfer_update(extension, status_code): 1xx=en curso, 200=confirmado, 4xx/5xx=error
+        self.on_transfer_update: Optional[Callable[[str, int], None]] = None
 
         # ── Ajustes de audio (modificables en tiempo real desde la UI) ──────
         # El mic_thread los lee en cada paquete (20 ms) → aplican inmediatamente.
@@ -637,6 +669,82 @@ class SIPClient:
                 pass
             self._current_call = None
             self._set_status(Status.REGISTERED)
+
+    def transfer(self, extension: str) -> bool:
+        """
+        Transferencia supervisada via REFER.
+        Envía REFER al interlocutor y monitorea NOTIFYs hasta recibir 200 OK
+        (extensión destino contestó) antes de colgar la llamada original.
+        """
+        if not self._current_call or self._status != Status.IN_CALL:
+            return False
+
+        call = self._current_call
+        request = call.request
+        sip = self._phone.sip
+        import re as _re_t
+
+        call_id = request.headers["Call-ID"]
+        tag = sip.tagLibrary.get(call_id, "")
+
+        # Request-URI: Contact del 200 OK (guardado por _patched_callback_RESP_OK)
+        contact_raw = request.headers.get("Contact", "")
+        m = _re_t.search(r"<([^>]+)>", str(contact_raw))
+        request_uri = m.group(1) if m else str(contact_raw).strip("<").strip(">")
+        if not request_uri:
+            request_uri = request.headers["To"]["raw"].strip("<").strip(">")
+
+        cseq = int(request.headers["CSeq"]["check"]) + 1
+        from_raw = request.headers["From"]["raw"]
+        to_raw   = request.headers["To"]["raw"]
+        to_tag   = request.headers["To"].get("tag", "")
+        rr       = request.headers.get("Record-Route")
+        route_h  = f"Route: {rr}\r\n" if rr else ""
+
+        new_branch = "z9hG4bK" + sip.gen_call_id()[:8]
+        refer_to   = f"sip:{extension}@{config.SIP_SERVER}"
+
+        refer  = f"REFER {request_uri} SIP/2.0\r\n"
+        refer += f"Via: SIP/2.0/UDP {sip.myIP}:{sip.myPort};branch={new_branch}\r\n"
+        refer += "Max-Forwards: 70\r\n"
+        refer += route_h
+        refer += f"From: {from_raw};tag={tag}\r\n"
+        refer += (f"To: {to_raw};tag={to_tag}\r\n" if to_tag else f"To: {to_raw}\r\n")
+        refer += f"Call-ID: {call_id}\r\n"
+        refer += f"CSeq: {cseq} REFER\r\n"
+        refer += f"Contact: <sip:{sip.username}@{sip.myIP}:{sip.myPort}>\r\n"
+        refer += f"Refer-To: <{refer_to}>\r\n"
+        refer += "Content-Length: 0\r\n\r\n"
+
+        # Actualizar CSeq guardado para que BYE use el número correcto
+        request.headers["CSeq"]["check"] = str(cseq)
+
+        def _on_notify(code: int):
+            if self.on_transfer_update:
+                self.on_transfer_update(extension, code)
+            if code == 200:
+                _refer_callbacks.pop(call_id, None)
+                # Pequeño retardo para que el 200 OK llegue al destino antes del BYE
+                threading.Timer(0.8, self.hangup).start()
+            elif code >= 400:
+                _refer_callbacks.pop(call_id, None)
+
+        _refer_callbacks[call_id] = _on_notify
+
+        try:
+            sip.out.sendto(refer.encode("utf8"), (sip.server, sip.port))
+            logger.info(f"REFER enviado → {refer_to}")
+            return True
+        except Exception as e:
+            logger.error(f"Error enviando REFER: {e}")
+            _refer_callbacks.pop(call_id, None)
+            return False
+
+    def cancel_transfer(self):
+        """Cancela la supervisión del REFER (no revierte la transferencia en curso)."""
+        if self._current_call:
+            call_id = self._current_call.request.headers.get("Call-ID", "")
+            _refer_callbacks.pop(call_id, None)
 
     def hangup(self):
         self._stop_monitor.set()

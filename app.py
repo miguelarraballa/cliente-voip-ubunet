@@ -17,6 +17,10 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+APP_VERSION = "1.0.0"
+APP_RELEASE = "20260604195333"
+APP_AUTHOR  = "Miguel Arrabal"
+
 _STATUS_DOT = {
     Status.DISCONNECTED: ("●", "#666666"),
     Status.CONNECTING:   ("●", "#FFA500"),
@@ -54,6 +58,7 @@ class VoIPApp(ctk.CTk):
         self._last_contacts_path: Optional[str] = self._contacts.last_imported_path()
         self._ringing: bool = False
         self._ring_path: Optional[str] = None  # ruta al .wav; None = bell() del sistema
+        self._call_who_label: str = ""
 
         # ── Estado de tracking para el historial ────────────────────────────
         self._log_type:     Optional[str]   = None   # "outgoing"|"incoming"
@@ -65,6 +70,7 @@ class VoIPApp(ctk.CTk):
         self._sip.on_status_change = self._on_status_change
         self._sip.on_incoming_call = self._on_incoming_call
         self._sip.on_call_ended = self._on_call_ended
+        self._sip.on_transfer_update = self._on_transfer_update
 
         self._build_ui()
         self._update_status_ui(Status.DISCONNECTED)
@@ -109,6 +115,13 @@ class VoIPApp(ctk.CTk):
             command=self._open_settings,
         ).pack(side="right", padx=(0, 0))
 
+        ctk.CTkButton(
+            self._header, text="ℹ", width=38, height=34, fg_color="transparent",
+            font=_btn_font,
+            text_color=("gray40", "gray70"), hover_color=("gray75", "gray30"),
+            command=self._open_about,
+        ).pack(side="right", padx=(0, 0))
+
         self._status_lbl = ctk.CTkLabel(self._header, text="", font=ctk.CTkFont(size=12))
         self._status_lbl.pack(side="right", padx=(0, 4))
 
@@ -130,6 +143,13 @@ class VoIPApp(ctk.CTk):
             fg_color="#CC2222", hover_color="#AA1111",
             command=self._do_hangup,
         ).pack(side="right")
+
+        self._transfer_btn = ctk.CTkButton(
+            inner, text="↗ Transferir", width=100, height=30,
+            fg_color="#2266AA", hover_color="#1a4d88",
+            command=self._do_transfer,
+        )
+        self._transfer_btn.pack(side="right", padx=(0, 6))
 
         # ── Panel llamada entrante (oculto por defecto) ──
         self._incoming_panel = ctk.CTkFrame(self, fg_color=("#fff3cd", "#3a3a00"), corner_radius=0)
@@ -252,6 +272,66 @@ class VoIPApp(ctk.CTk):
             self._log_type = None
         self._sip.deny()
         self._incoming_panel.pack_forget()
+
+    def _do_transfer(self):
+        if hasattr(self, "_transfer_win") and self._transfer_win.winfo_exists():
+            self._transfer_win.lift()
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Transferir llamada")
+        win.geometry("300x140")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        self._transfer_win = win
+
+        ctk.CTkLabel(win, text="Extensión destino:",
+                     font=ctk.CTkFont(size=13)).pack(pady=(18, 4))
+
+        ext_var = ctk.StringVar()
+        entry = ctk.CTkEntry(win, textvariable=ext_var,
+                             placeholder_text="Ej: 102", width=160)
+        entry.pack(pady=4)
+        entry.focus()
+
+        def _confirm():
+            ext = ext_var.get().strip()
+            if not ext:
+                return
+            win.destroy()
+            self._transfer_btn.configure(state="disabled")
+            self._call_who.configure(text=f"↗  Transfiriendo a {ext}…")
+            ok = self._sip.transfer(ext)
+            if not ok:
+                self._call_who.configure(text=f"📞  {self._incoming_caller or self._dial_var.get()}")
+                self._transfer_btn.configure(state="normal")
+                messagebox.showerror("Error de transferencia",
+                                     "No se pudo enviar la solicitud de transferencia.")
+
+        entry.bind("<Return>", lambda _: _confirm())
+        ctk.CTkButton(win, text="Transferir", width=120,
+                      fg_color="#2266AA", hover_color="#1a4d88",
+                      command=_confirm).pack(pady=(8, 0))
+
+    def _on_transfer_update(self, extension: str, status_code: int):
+        self.after(0, self._handle_transfer_update, extension, status_code)
+
+    def _handle_transfer_update(self, extension: str, status_code: int):
+        if status_code < 200:
+            # En curso (100 Trying, 180 Ringing…)
+            self._call_who.configure(text=f"↗  Sonando en {extension}…")
+        elif status_code == 200:
+            # Confirmado — hangup() se llama automáticamente desde sip_client
+            self._call_who.configure(text=f"✓  Transferido a {extension}")
+        else:
+            # Error (486 Busy, 404 Not Found, …)
+            self._transfer_btn.configure(state="normal")
+            self._call_who.configure(text=getattr(self, "_call_who_label", "📞"))
+            messagebox.showwarning(
+                "Transferencia fallida",
+                f"La extensión {extension} no está disponible ({status_code}).\n"
+                "Sigues conectado con el interlocutor.",
+            )
 
     def _do_hangup(self):
         self._sip.hangup()
@@ -405,6 +485,8 @@ class VoIPApp(ctk.CTk):
 
     def _show_call_panel(self, label: str):
         self._call_who.configure(text=label)
+        self._call_who_label = label  # guardado para restaurar tras transferencia fallida
+        self._transfer_btn.configure(state="normal")
         self._call_start = time.time()
         self._call_panel.pack(fill="x", after=self._header)
         self._incoming_panel.pack_forget()
@@ -724,6 +806,30 @@ class VoIPApp(ctk.CTk):
         ctk.CTkLabel(at, text="Los cambios de audio se aplican inmediatamente.",
                      text_color="gray", font=ctk.CTkFont(size=10)
                      ).pack(pady=(0, 8))
+
+    def _open_about(self):
+        if hasattr(self, "_about_win") and self._about_win.winfo_exists():
+            self._about_win.lift()
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Acerca de")
+        win.geometry("320x220")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        self._about_win = win
+
+        ctk.CTkLabel(win, text="Ubutel VoIP",
+                     font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(24, 4))
+        ctk.CTkLabel(win, text=f"Versión {APP_VERSION}",
+                     font=ctk.CTkFont(size=13)).pack()
+        ctk.CTkLabel(win, text=f"Release: {APP_RELEASE}",
+                     font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 0))
+        ctk.CTkLabel(win, text=f"Autor: {APP_AUTHOR}",
+                     font=ctk.CTkFont(size=12)).pack(pady=(10, 0))
+
+        ctk.CTkButton(win, text="Cerrar", width=100,
+                      command=win.destroy).pack(pady=(20, 0))
 
     def _on_close(self):
         self._finalize_log_entry()
