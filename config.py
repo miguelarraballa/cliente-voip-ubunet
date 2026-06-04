@@ -11,7 +11,7 @@ load_dotenv(_env)
 
 SIP_SERVER = os.getenv("SIP_SERVER", "ubcloud02.ubutel.eu")
 SIP_PORT = int(os.getenv("SIP_PORT", "5060"))
-SIP_USER = os.getenv("SIP_USER", "ext200212955")
+SIP_USER = os.getenv("SIP_USER", "")
 SIP_PASSWORD = os.getenv("SIP_PASSWORD", "")
 SIP_DOMAIN = os.getenv("SIP_DOMAIN", "ubcloud02.ubutel.eu")
 AUDIO_INPUT  = os.getenv("AUDIO_INPUT", "")   # micro: nombre parcial, vacío = por defecto

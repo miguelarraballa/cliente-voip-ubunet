@@ -1,16 +1,19 @@
 """
-Prueba de conectividad SIP contra ubcloud02.ubutel.eu:5060
-Intenta UDP y TCP (sin contraseña) para ver qué protocolos acepta el servidor.
+Prueba de conectividad SIP. Carga la configuración desde .env.
 Un 401 Unauthorized significa que el protocolo funciona (el servidor responde).
 """
+import os
 import socket
 import ssl
 import time
 import uuid
+from dotenv import load_dotenv
 
-SERVER = "ubcloud02.ubutel.eu"
-PORT = 5060
-USER = "ext200212955"
+load_dotenv()
+
+SERVER = os.getenv("SIP_SERVER", "")
+PORT = int(os.getenv("SIP_PORT", "5060"))
+USER = os.getenv("SIP_USER", "")
 TIMEOUT = 5
 
 
