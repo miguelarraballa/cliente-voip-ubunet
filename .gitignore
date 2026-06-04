@@ -1,0 +1,36 @@
+# Entorno virtual
+venv/
+env/
+.venv/
+
+# Variables de entorno y credenciales
+.env
+*.env
+
+# Datos de usuario (runtime)
+.call_log.json
+.voip_settings.json
+nombres_extensiones.csv
+
+# Build y distribución (PyInstaller)
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+
+# Iconos y recursos compilados (regenerables)
+*.icns

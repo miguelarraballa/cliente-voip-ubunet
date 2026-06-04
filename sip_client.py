@@ -2,6 +2,7 @@
 Wrapper sobre pyVoIP que gestiona registro SIP, llamadas salientes y entrantes.
 Expone callbacks thread-safe para la UI.
 """
+import struct
 import threading
 import logging
 import traceback
@@ -372,7 +373,109 @@ def _patched_callback_RESP_OK(self, request):
     except Exception as _e:
         logger.error(f"VoIPCall.answered() falló: {_e}\n{traceback.format_exc()}")
 
+    # Guardar Record-Route del 200 OK en el request del diálogo para que
+    # gen_bye pueda incluirlo como Route header (sin él el proxy no reenvía
+    # el BYE al B2BUA interno y la llamada queda abierta en el interlocutor).
+    rr = request.headers.get("Record-Route")
+    if rr and call_id in self.calls:
+        self.calls[call_id].request.headers["Record-Route"] = rr
+
 VoIPPhone._callback_RESP_OK = _patched_callback_RESP_OK
+
+
+# 5) RTPClient.encode_packet: pyVoIP bug — PCMA llama encode_pcmu (µ-law) en lugar
+#    de encode_pcma (A-law). La solución completa es hacer encode_packet un
+#    pass-through y pre-encodificar desde int16 en _start_audio, lo que además
+#    evita la pérdida de calidad de int16→int8→codec.
+import pyVoIP.RTP as _pv_rtp
+
+# 5b) gen_bye: igual que el ACK, el BYE debe incluir Route del Record-Route
+#     del 200 OK para que el proxy (Kamailio) reenvíe el BYE al B2BUA interno.
+#     Sin Route, el proxy lo ignora → el interlocutor no recibe el BYE → llamada
+#     queda abierta en su lado aunque nosotros ya hayamos colgado.
+
+def _patched_gen_bye(self, request):
+    import re as _re2
+    import pyVoIP as _pv2
+    tag = self.tagLibrary.get(request.headers["Call-ID"], "")
+
+    # Request-URI: Contact del 200 OK (actualizado por answered() en el request)
+    contact_raw = request.headers.get("Contact", "")
+    m = _re2.search(r"<([^>]+)>", str(contact_raw))
+    request_uri = m.group(1) if m else str(contact_raw).strip("<").strip(">")
+    if not request_uri:
+        request_uri = request.headers["To"]["raw"].strip("<").strip(">")
+
+    new_branch = "z9hG4bK" + self.gen_call_id()[:8]
+    bye  = f"BYE {request_uri} SIP/2.0\r\n"
+    bye += f"Via: SIP/2.0/UDP {self.myIP}:{self.myPort};branch={new_branch}\r\n"
+    bye += "Max-Forwards: 70\r\n"
+
+    rr = request.headers.get("Record-Route")
+    if rr:
+        bye += f"Route: {rr}\r\n"
+
+    fromH = request.headers["From"]["raw"]
+    toH   = request.headers["To"]["raw"]
+    if request.headers["From"]["tag"] == tag:
+        bye += f"From: {fromH};tag={tag}\r\n"
+        to_tag = request.headers["To"].get("tag", "")
+        bye += (f"To: {toH};tag={to_tag}\r\n" if to_tag else f"To: {toH}\r\n")
+    else:
+        bye += f"To: {fromH};tag={request.headers['From']['tag']}\r\n"
+        bye += f"From: {toH};tag={tag}\r\n"
+
+    cseq = int(request.headers["CSeq"]["check"]) + 1
+    bye += f"Call-ID: {request.headers['Call-ID']}\r\n"
+    bye += f"CSeq: {cseq} BYE\r\n"
+    bye += f"Contact: <sip:{self.username}@{self.myIP}:{self.myPort}>\r\n"
+    bye += f"User-Agent: pyVoIP {_pv2.__version__}\r\n"
+    bye += "Content-Length: 0\r\n\r\n"
+    logger.info(f"BYE → {request_uri} | Route={'sí' if rr else 'no'}")
+    return bye
+
+_pv_sip.SIPClient.gen_bye = _patched_gen_bye
+
+
+_pv_rtp.RTPClient.encode_packet = lambda self, payload: payload
+
+
+# 6) RTPClient.trans: añade soporte de flag _stop_trans por instancia.
+#    Sin este parche, trans() sigue enviando silencio desde pmout vacío
+#    mientras nuestro mic_thread envía RTP directamente → dos streams con
+#    distinto SSRC → el servidor confunde el flujo de audio.
+import warnings as _warnings
+
+def _patched_rtp_trans(self) -> None:
+    while self.NSD:
+        if getattr(self, "_stop_trans", False):
+            return
+        last_sent = time.monotonic_ns()
+        payload = self.pmout.read()
+        payload = self.encode_packet(payload)
+        packet = b"\x80"
+        packet += chr(int(self.preference)).encode("utf8")
+        try:
+            packet += self.outSequence.to_bytes(2, byteorder="big")
+        except OverflowError:
+            self.outSequence = 0
+        try:
+            packet += self.outTimestamp.to_bytes(4, byteorder="big")
+        except OverflowError:
+            self.outTimestamp = 0
+        packet += self.outSSRC.to_bytes(4, byteorder="big")
+        packet += payload
+        try:
+            self.sout.sendto(packet, (self.outIP, self.outPort))
+        except OSError:
+            _warnings.warn("RTP Packet failed to send!", RuntimeWarning, stacklevel=2)
+        self.outSequence += 1
+        self.outTimestamp += len(payload)
+        delay = (1 / self.preference.rate) * 160
+        sleep_time = max(0, delay - (time.monotonic_ns() - last_sent) / 1_000_000_000)
+        time.sleep(sleep_time)
+
+_pv_rtp.RTPClient.trans = _patched_rtp_trans
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Tiempo máximo (segundos) que una llamada puede estar en estado DIALING/RINGING
@@ -410,6 +513,12 @@ class SIPClient:
         self.on_status_change: Optional[Callable[[Status], None]] = None
         self.on_incoming_call: Optional[Callable[[str], None]] = None  # caller_id
         self.on_call_ended: Optional[Callable[[], None]] = None
+
+        # ── Ajustes de audio (modificables en tiempo real desde la UI) ──────
+        # El mic_thread los lee en cada paquete (20 ms) → aplican inmediatamente.
+        self.noise_gate_dbfs: float = config.AUDIO_NOISE_GATE_DBFS
+        self.echo_gate_rms:   int   = 1200
+        self.echo_gate_factor: float = 0.08
 
     @property
     def status(self) -> Status:
@@ -544,9 +653,19 @@ class SIPClient:
     # ─── Callbacks internos ──────────────────────────────────────────────────────
 
     def _incoming_call_handler(self, call: VoIPCall):
+        # Rechazar si ya hay una llamada activa
+        if self._status not in (Status.REGISTERED, Status.DISCONNECTED, Status.ERROR):
+            logger.info("Llamada entrante rechazada — ya hay una llamada activa")
+            try:
+                call.deny()
+            except Exception:
+                pass
+            return
+
         self._stop_monitor = threading.Event()
         self._current_call = call
         caller = self._extract_caller(call)
+        logger.info(f"Llamada entrante de: {caller}")
         self._set_status(Status.INCOMING)
         if self.on_incoming_call:
             self.on_incoming_call(caller)
@@ -626,46 +745,138 @@ class SIPClient:
         return None
 
     def _start_audio(self, call: VoIPCall):
-        """Arranca el bucle de audio en un hilo propio."""
-        def audio_loop():
-            CHUNK = 160   # muestras por trama (20ms a 8000 Hz)
-            RATE = 8000
-            import sounddevice as sd
-            import numpy as np
-            import audioop
+        """Audio de la llamada activa.
 
-            # pyVoIP usa PCM lineal 8-bit unsigned internamente:
-            #   read_audio()  → uint8 (ulaw2lin + bias+128)
-            #   write_audio() → uint8 (encode_pcmu hace bias-128 + lin2ulaw)
-            # sounddevice trabaja con int16, así que hay que convertir.
+        Mejoras:
+        1. Bypass de trans() de pyVoIP: el mic_thread envía RTP directamente
+           con el mismo socket/SSRC heredado → sin drift de timing entre dos
+           loops de 20 ms independientes.
+        2. Jitter buffer limitado (MAX_JITTER_BYTES) para evitar lag acumulado
+           en pmin cuando el remoto envía ligeramente más rápido que consumimos.
+        3. Echo gate: atenua el micro cuando el altavoz suena fuerte, reduciendo
+           el eco acústico del altavoz sobre el micrófono.
+        """
+        import sounddevice as sd
+        import numpy as np
+        import audioop
 
-            dev_in  = self._find_audio_device(config.AUDIO_INPUT,  "input")
-            dev_out = self._find_audio_device(config.AUDIO_OUTPUT, "output")
-            device = (dev_in, dev_out)  # sd.Stream acepta tupla (input, output)
+        CHUNK            = 160
+        RATE             = 8000
+        MAX_JITTER_BYTES = CHUNK * 4   # 80 ms máx en buffer de recepción
+        NOISE_GATE_HOLD  = 10          # paquetes (200 ms) de retención tras bajar umbral
+        # self.noise_gate_dbfs, self.echo_gate_rms, self.echo_gate_factor
+        # se leen en cada paquete → cambios aplicados inmediatamente desde la UI
+
+        dev_in  = self._find_audio_device(config.AUDIO_INPUT,  "input")
+        dev_out = self._find_audio_device(config.AUDIO_OUTPUT, "output")
+
+        if not call.RTPClients:
+            logger.error("Sin RTPClients — no se puede iniciar audio")
+            return
+        rtp_cli = call.RTPClients[0]
+        codec   = rtp_cli.preference or _pv_rtp.PayloadType.PCMU
+        pt      = int(codec)
+        logger.info(f"Codec audio: {codec.name} (PT={pt})")
+
+        # Parar trans() de pyVoIP y continuar desde su secuencia/timestamp
+        for c in call.RTPClients:
+            c._stop_trans = True
+        time.sleep(0.055)
+        rtp_seq  = rtp_cli.outSequence
+        rtp_ts   = rtp_cli.outTimestamp
+        rtp_ssrc = rtp_cli.outSSRC
+        out_sock = rtp_cli.sout
+        out_addr = (rtp_cli.outIP, rtp_cli.outPort)
+
+        def encode_mic(s16: np.ndarray) -> bytes:
+            raw = s16.astype(np.int16).tobytes()
+            return audioop.lin2alaw(raw, 2) if codec == _pv_rtp.PayloadType.PCMA else audioop.lin2ulaw(raw, 2)
+
+        def decode_rtp(u8: bytes) -> np.ndarray:
+            s8  = audioop.bias(u8, 1, -128)
+            s16 = audioop.lin2lin(s8, 1, 2)
+            return np.frombuffer(s16, dtype="int16").reshape(-1, 1)
+
+        def trim_pmin() -> None:
+            pm = rtp_cli.pmin
+            with pm.bufferLock:
+                pos = pm.buffer.tell()
+                pm.buffer.seek(0, 2)
+                end = pm.buffer.tell()
+                pm.buffer.seek(pos)
+                excess = (end - pos) - MAX_JITTER_BYTES
+            if excess > 0:
+                with pm.bufferLock:
+                    pm.buffer.seek(excess, 1)
+
+        silence_pcm  = np.zeros((CHUNK, 1), dtype="int16")
+        received_rms = 0  # compartida entre hilos (asignación atómica en CPython)
+
+        def mic_thread():
+            nonlocal rtp_seq, rtp_ts, received_rms
+            hold = 0  # contador de paquetes de hold tras bajar del umbral
             try:
-                with sd.Stream(
+                with sd.InputStream(
                     samplerate=RATE, channels=1, dtype="int16",
-                    blocksize=CHUNK, device=device,
+                    blocksize=CHUNK, device=dev_in, latency="low",
                 ) as stream:
                     while call.state == CallState.ANSWERED:
-                        # ── Micrófono → llamada ──────────────────────────────
-                        mic_s16, _ = stream.read(CHUNK)          # (160,1) int16
-                        mic_s16_bytes = mic_s16.tobytes()         # 320 bytes int16 LE
-                        mic_s8 = audioop.lin2lin(mic_s16_bytes, 2, 1)  # → 160 bytes int8
-                        mic_u8 = audioop.bias(mic_s8, 1, 128)    # int8 → uint8 [0-255]
-                        call.write_audio(mic_u8)
+                        data, _ = stream.read(CHUNK)
+                        rms = int(np.sqrt(np.mean(data.astype(np.int32) ** 2)))
+                        ng_rms = int(32767 * 10 ** (self.noise_gate_dbfs / 20))
 
-                        # ── Llamada → altavoz ────────────────────────────────
-                        rtp_u8 = call.read_audio(CHUNK)           # 160 bytes uint8
-                        if rtp_u8 and len(rtp_u8) == CHUNK:
-                            rtp_s8 = audioop.bias(rtp_u8, 1, -128)     # uint8 → int8
-                            rtp_s16 = audioop.lin2lin(rtp_s8, 1, 2)    # int8 → int16
-                            arr = np.frombuffer(rtp_s16, dtype="int16").reshape(-1, 1)
-                            stream.write(arr)
+                        if received_rms > self.echo_gate_rms:
+                            # Echo gate: interlocutor habla → atenuar micro
+                            data = (data * self.echo_gate_factor).astype(np.int16)
+                            hold = 0
+                        elif rms > ng_rms:
+                            hold = NOISE_GATE_HOLD
+                        elif hold > 0:
+                            hold -= 1
+                        else:
+                            data = np.zeros_like(data)
+
+                        payload = encode_mic(data)
+                        hdr = struct.pack(
+                            "!BBHII",
+                            0x80, pt,
+                            rtp_seq & 0xFFFF,
+                            rtp_ts  & 0xFFFFFFFF,
+                            rtp_ssrc,
+                        )
+                        try:
+                            out_sock.sendto(hdr + payload, out_addr)
+                        except OSError:
+                            pass
+                        rtp_seq += 1
+                        rtp_ts  += CHUNK
             except Exception as e:
-                logger.error(f"Error de audio: {e}")
+                logger.error(f"Error audio mic: {e}")
 
-        threading.Thread(target=audio_loop, daemon=True, name="audio-loop").start()
+        def speaker_thread():
+            nonlocal received_rms
+            try:
+                with sd.OutputStream(
+                    samplerate=RATE, channels=1, dtype="int16",
+                    blocksize=CHUNK, device=dev_out, latency="low",
+                ) as stream:
+                    while call.state == CallState.ANSWERED:
+                        trim_pmin()
+                        rtp_u8 = call.read_audio(CHUNK, blocking=False)
+                        if rtp_u8 and len(rtp_u8) == CHUNK:
+                            pcm = decode_rtp(rtp_u8)
+                            received_rms = int(
+                                np.sqrt(np.mean(pcm.astype(np.int32) ** 2))
+                            )
+                            stream.write(pcm)
+                        else:
+                            received_rms = 0
+                            stream.write(silence_pcm)
+            except Exception as e:
+                logger.error(f"Error audio altavoz: {e}")
+
+        threading.Thread(target=mic_thread,     daemon=True, name="audio-mic").start()
+        threading.Thread(target=speaker_thread, daemon=True, name="audio-spk").start()
 
     # ─── Utilidades ──────────────────────────────────────────────────────────────
 
