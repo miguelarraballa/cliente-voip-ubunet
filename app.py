@@ -17,8 +17,8 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "1.0.0"
-APP_RELEASE = "20260604195333"
+APP_VERSION = "1.0.2"
+APP_RELEASE = "20260604203800"
 APP_AUTHOR  = "Miguel Arrabal"
 
 _STATUS_DOT = {
@@ -59,6 +59,8 @@ class VoIPApp(ctk.CTk):
         self._ringing: bool = False
         self._ring_path: Optional[str] = None  # ruta al .wav; None = bell() del sistema
         self._call_who_label: str = ""
+        self._rec_folder: str = os.path.join(os.path.expanduser("~"), "ubutelbeta5")
+        self._recording: bool = False
 
         # ── Estado de tracking para el historial ────────────────────────────
         self._log_type:     Optional[str]   = None   # "outgoing"|"incoming"
@@ -132,12 +134,7 @@ class VoIPApp(ctk.CTk):
         inner = ctk.CTkFrame(self._call_panel, fg_color="transparent")
         inner.pack(pady=10, padx=16, fill="x")
 
-        self._call_who = ctk.CTkLabel(inner, text="", font=ctk.CTkFont(size=14, weight="bold"))
-        self._call_who.pack(side="left")
-
-        self._call_timer = ctk.CTkLabel(inner, text="00:00", font=ctk.CTkFont(size=13), text_color="gray")
-        self._call_timer.pack(side="left", padx=10)
-
+        # Botones primero (side="right") para que siempre tengan espacio garantizado
         ctk.CTkButton(
             inner, text="Colgar", width=80, height=30,
             fg_color="#CC2222", hover_color="#AA1111",
@@ -150,6 +147,20 @@ class VoIPApp(ctk.CTk):
             command=self._do_transfer,
         )
         self._transfer_btn.pack(side="right", padx=(0, 6))
+
+        self._rec_btn = ctk.CTkButton(
+            inner, text="⏺", width=38, height=30,
+            fg_color=("gray55", "gray30"), hover_color=("gray45", "gray25"),
+            command=self._do_record_toggle,
+        )
+        self._rec_btn.pack(side="right", padx=(0, 6))
+
+        # Etiquetas después: ocupan el espacio restante a la izquierda
+        self._call_who = ctk.CTkLabel(inner, text="", font=ctk.CTkFont(size=14, weight="bold"))
+        self._call_who.pack(side="left")
+
+        self._call_timer = ctk.CTkLabel(inner, text="00:00", font=ctk.CTkFont(size=13), text_color="gray")
+        self._call_timer.pack(side="left", padx=10)
 
         # ── Panel llamada entrante (oculto por defecto) ──
         self._incoming_panel = ctk.CTkFrame(self, fg_color=("#fff3cd", "#3a3a00"), corner_radius=0)
@@ -313,6 +324,29 @@ class VoIPApp(ctk.CTk):
                       fg_color="#2266AA", hover_color="#1a4d88",
                       command=_confirm).pack(pady=(8, 0))
 
+    def _do_record_toggle(self):
+        import datetime
+        if not self._recording:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            number = "".join(c for c in (self._log_number or "llamada") if c.isalnum() or c in "-_")
+            filename = f"rec_{ts}_{number}.wav"
+            try:
+                os.makedirs(self._rec_folder, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("Error de grabación", f"No se puede crear la carpeta:\n{e}")
+                return
+            path = os.path.join(self._rec_folder, filename)
+            if self._sip.start_recording(path):
+                self._recording = True
+                self._rec_btn.configure(text="⏹", fg_color="#CC2222", hover_color="#AA1111")
+        else:
+            self._sip.stop_recording()
+            self._recording = False
+            self._rec_btn.configure(
+                text="⏺",
+                fg_color=("gray55", "gray30"), hover_color=("gray45", "gray25"),
+            )
+
     def _on_transfer_update(self, extension: str, status_code: int):
         self.after(0, self._handle_transfer_update, extension, status_code)
 
@@ -334,6 +368,9 @@ class VoIPApp(ctk.CTk):
             )
 
     def _do_hangup(self):
+        if self._recording:
+            self._sip.stop_recording()
+            self._recording = False
         self._sip.hangup()
         self._call_panel.pack_forget()
         self._call_start = None
@@ -448,6 +485,13 @@ class VoIPApp(ctk.CTk):
     def _handle_call_ended(self):
         self._stop_ring()
         self._finalize_log_entry()
+        if self._recording:
+            self._sip.stop_recording()
+            self._recording = False
+            self._rec_btn.configure(
+                text="⏺",
+                fg_color=("gray55", "gray30"), hover_color=("gray45", "gray25"),
+            )
         self._call_panel.pack_forget()
         self._incoming_panel.pack_forget()
         self._call_start = None
@@ -487,6 +531,11 @@ class VoIPApp(ctk.CTk):
         self._call_who.configure(text=label)
         self._call_who_label = label  # guardado para restaurar tras transferencia fallida
         self._transfer_btn.configure(state="normal")
+        self._recording = False
+        self._rec_btn.configure(
+            text="⏺",
+            fg_color=("gray55", "gray30"), hover_color=("gray45", "gray25"),
+        )
         self._call_start = time.time()
         self._call_panel.pack(fill="x", after=self._header)
         self._incoming_panel.pack_forget()
@@ -615,6 +664,9 @@ class VoIPApp(ctk.CTk):
         if "echo_gate_factor" in s: self._sip.echo_gate_factor = float(s["echo_gate_factor"])
         rp = s.get("ring_path", "")
         self._ring_path = rp if rp and os.path.exists(rp) else None
+        rdir = s.get("rec_folder", "")
+        if rdir:
+            self._rec_folder = rdir
 
     def _load_connection_settings(self):
         """Lee credenciales SIP guardadas y las aplica en el módulo config."""
@@ -639,7 +691,7 @@ class VoIPApp(ctk.CTk):
 
         win = ctk.CTkToplevel(self)
         win.title("Ajustes")
-        win.geometry("420x500")
+        win.geometry("420x620")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         self._settings_win = win
@@ -788,6 +840,44 @@ class VoIPApp(ctk.CTk):
                       command=clear_ring).pack(side="right", padx=(4, 0))
         ctk.CTkButton(ring_row, text="Seleccionar…", width=110, height=26,
                       command=pick_ring).pack(side="right")
+
+        # ── Carpeta de grabaciones ───────────────────────────────────────────
+        section("Grabaciones")
+        ctk.CTkLabel(at, text="Carpeta donde se guardan los ficheros WAV grabados.",
+                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w"
+                     ).pack(fill="x", padx=4)
+
+        rec_row = ctk.CTkFrame(at, fg_color="transparent")
+        rec_row.pack(fill="x", padx=4, pady=4)
+
+        def _fmt_rec_path(p: str) -> str:
+            home = os.path.expanduser("~")
+            return ("~" + p[len(home):]) if p.startswith(home) else p
+
+        rec_dir_lbl = ctk.CTkLabel(rec_row, text=_fmt_rec_path(self._rec_folder),
+                                   anchor="w", font=ctk.CTkFont(size=11))
+        rec_dir_lbl.pack(side="left", fill="x", expand=True)
+
+        def reset_rec_folder():
+            self._rec_folder = os.path.join(os.path.expanduser("~"), "ubutelbeta5")
+            _write_settings({"rec_folder": ""})
+            rec_dir_lbl.configure(text="~/ubutelbeta5")
+
+        def pick_rec_folder():
+            path = filedialog.askdirectory(
+                title="Carpeta de grabaciones",
+                parent=win,
+            )
+            if path:
+                self._rec_folder = path
+                _write_settings({"rec_folder": path})
+                rec_dir_lbl.configure(text=_fmt_rec_path(path))
+
+        ctk.CTkButton(rec_row, text="✕", width=28, height=26,
+                      fg_color="transparent", border_width=1,
+                      command=reset_rec_folder).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(rec_row, text="Seleccionar…", width=110, height=26,
+                      command=pick_rec_folder).pack(side="right")
 
         # ── Reset / nota ─────────────────────────────────────────────────────
         def reset_audio():

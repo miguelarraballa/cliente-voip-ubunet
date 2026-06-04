@@ -2,12 +2,15 @@
 Wrapper sobre pyVoIP que gestiona registro SIP, llamadas salientes y entrantes.
 Expone callbacks thread-safe para la UI.
 """
+import os
+import queue
 import struct
 import threading
 import logging
 import traceback
 import socket
 import time
+import wave
 from enum import Enum, auto
 from typing import Optional, Callable
 
@@ -552,6 +555,9 @@ class SIPClient:
         self.echo_gate_rms:   int   = 1200
         self.echo_gate_factor: float = 0.08
 
+        self._rec_active: bool = False
+        self._rec_path: Optional[str] = None
+
     @property
     def status(self) -> Status:
         return self._status
@@ -746,6 +752,23 @@ class SIPClient:
             call_id = self._current_call.request.headers.get("Call-ID", "")
             _refer_callbacks.pop(call_id, None)
 
+    def start_recording(self, path: str) -> bool:
+        """Inicia la grabación de la llamada activa (WAV estéreo: mic canal L, interlocutor canal R)."""
+        if self._rec_active:
+            return False
+        self._rec_path = path
+        self._rec_active = True
+        return True
+
+    def stop_recording(self) -> Optional[str]:
+        """Detiene la grabación y devuelve la ruta del fichero grabado."""
+        if not self._rec_active:
+            return None
+        self._rec_active = False
+        path = self._rec_path
+        self._rec_path = None
+        return path
+
     def hangup(self):
         self._stop_monitor.set()
         if self._current_call:
@@ -920,6 +943,9 @@ class SIPClient:
         silence_pcm  = np.zeros((CHUNK, 1), dtype="int16")
         received_rms = 0  # compartida entre hilos (asignación atómica en CPython)
 
+        rec_mic_q: queue.Queue = queue.Queue()
+        rec_spk_q: queue.Queue = queue.Queue()
+
         def mic_thread():
             nonlocal rtp_seq, rtp_ts, received_rms
             hold = 0  # contador de paquetes de hold tras bajar del umbral
@@ -944,6 +970,8 @@ class SIPClient:
                         else:
                             data = np.zeros_like(data)
 
+                        if self._rec_active:
+                            rec_mic_q.put(data.copy())
                         payload = encode_mic(data)
                         hdr = struct.pack(
                             "!BBHII",
@@ -976,6 +1004,8 @@ class SIPClient:
                             received_rms = int(
                                 np.sqrt(np.mean(pcm.astype(np.int32) ** 2))
                             )
+                            if self._rec_active:
+                                rec_spk_q.put(pcm.copy())
                             stream.write(pcm)
                         else:
                             received_rms = 0
@@ -983,8 +1013,49 @@ class SIPClient:
             except Exception as e:
                 logger.error(f"Error audio altavoz: {e}")
 
+        def recorder_thread():
+            wav_f = None
+            tracked_path = None
+            try:
+                while call.state == CallState.ANSWERED:
+                    if self._rec_active and self._rec_path != tracked_path:
+                        if wav_f:
+                            wav_f.close()
+                        tracked_path = self._rec_path
+                        wav_f = wave.open(tracked_path, "wb")
+                        wav_f.setnchannels(2)
+                        wav_f.setsampwidth(2)
+                        wav_f.setframerate(RATE)
+                        logger.info(f"Grabación iniciada: {tracked_path}")
+                    if not self._rec_active and wav_f:
+                        wav_f.close()
+                        wav_f = None
+                        tracked_path = None
+                        logger.info("Grabación detenida")
+                    if self._rec_active and wav_f:
+                        try:
+                            mic_chunk = rec_mic_q.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
+                        try:
+                            spk_chunk = rec_spk_q.get_nowait()
+                        except queue.Empty:
+                            spk_chunk = silence_pcm
+                        stereo = np.empty(CHUNK * 2, dtype=np.int16)
+                        stereo[0::2] = mic_chunk.flatten()
+                        stereo[1::2] = spk_chunk.flatten()
+                        wav_f.writeframes(stereo.tobytes())
+                    else:
+                        time.sleep(0.02)
+            finally:
+                if wav_f:
+                    wav_f.close()
+                self._rec_active = False
+                self._rec_path = None
+
         threading.Thread(target=mic_thread,     daemon=True, name="audio-mic").start()
         threading.Thread(target=speaker_thread, daemon=True, name="audio-spk").start()
+        threading.Thread(target=recorder_thread, daemon=True, name="audio-rec").start()
 
     # ─── Utilidades ──────────────────────────────────────────────────────────────
 
