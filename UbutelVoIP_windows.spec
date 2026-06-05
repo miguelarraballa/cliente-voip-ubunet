@@ -22,6 +22,7 @@ hidden = (
     + [
         "sounddevice", "_sounddevice",
         "numpy", "numpy.core", "numpy.core._multiarray_umath",
+        "secrets", "hashlib",
         "customtkinter",
         "tkinter", "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox",
         "_tkinter",
