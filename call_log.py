@@ -2,11 +2,14 @@
 Historial de llamadas: entrantes, salientes y perdidas.
 """
 import json
+import logging
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, List
 
 from app_paths import USER_DATA_DIR
+
+_log = logging.getLogger(__name__)
 _LOG_FILE = USER_DATA_DIR / ".call_log.json"
 _MAX_ENTRIES = 1000
 
@@ -94,7 +97,7 @@ class CallLog:
                 encoding="utf-8",
             )
         except Exception:
-            pass
+            _log.exception("Error guardando historial en %s", _LOG_FILE)
 
     # ── API pública ───────────────────────────────────────────────────────────
 
