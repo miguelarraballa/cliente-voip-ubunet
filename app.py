@@ -17,8 +17,8 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "1.0.3"
-APP_RELEASE = "20260605114400"
+APP_VERSION = "1.0.4"
+APP_RELEASE = "20260605123400"
 APP_AUTHOR  = "Miguel Arrabal"
 
 _STATUS_DOT = {
