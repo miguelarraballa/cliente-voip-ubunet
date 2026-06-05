@@ -15,7 +15,6 @@ nombres_extensiones.csv
 # Build y distribución (PyInstaller)
 build/
 dist/
-*.spec
 
 # Python
 __pycache__/
