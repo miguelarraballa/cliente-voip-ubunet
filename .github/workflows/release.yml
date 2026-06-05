@@ -25,7 +25,6 @@ jobs:
             customtkinter==5.2.2 \
             sounddevice==0.5.5 \
             numpy==1.26.4 \
-            audioop-lts==0.2.2 \
             python-dotenv==1.2.2 \
             pyinstaller
 
@@ -61,7 +60,6 @@ jobs:
             customtkinter==5.2.2 `
             sounddevice==0.5.5 `
             numpy==1.26.4 `
-            audioop-lts==0.2.2 `
             python-dotenv==1.2.2 `
             pyinstaller `
             pillow
@@ -114,7 +112,6 @@ jobs:
             customtkinter==5.2.2 \
             sounddevice==0.5.5 \
             numpy==1.26.4 \
-            audioop-lts==0.2.2 \
             python-dotenv==1.2.2 \
             pyinstaller
 
