@@ -11,10 +11,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # ── Assets ──────────────────────────────────────────────────────────────────
 ctk_datas    = collect_data_files("customtkinter")
 pyvoip_datas = collect_data_files("pyVoIP")
-
-# PortAudio dylib que necesita sounddevice
-portaudio = ("venv/lib/python3.13/site-packages/_sounddevice_data",
-             "_sounddevice_data")
+sd_datas     = collect_data_files("sounddevice")
 
 # ── Hidden imports ───────────────────────────────────────────────────────────
 hidden = (
@@ -37,7 +34,7 @@ a = Analysis(
     ["main.py"],
     pathex=["."],
     binaries=[],
-    datas=ctk_datas + pyvoip_datas + [portaudio],
+    datas=ctk_datas + pyvoip_datas + sd_datas,
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},
