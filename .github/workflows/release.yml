@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            pyVoIP==1.6.8 \
+            customtkinter==5.2.2 \
+            sounddevice==0.5.5 \
+            numpy==1.26.4 \
+            audioop-lts==0.2.2 \
+            python-dotenv==1.2.2 \
+            pyinstaller
+
+      - name: Build .app
+        run: pyinstaller UbutelVoIP.spec --noconfirm
+
+      - name: Zip .app
+        run: cd dist && zip -r ../UbutelVoIP-macOS.zip UbutelVoIP.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: UbutelVoIP-macOS.zip
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install `
+            pyVoIP==1.6.8 `
+            customtkinter==5.2.2 `
+            sounddevice==0.5.5 `
+            numpy==1.26.4 `
+            audioop-lts==0.2.2 `
+            python-dotenv==1.2.2 `
+            pyinstaller `
+            pillow
+
+      - name: Convert icon PNG → ICO
+        run: |
+          python -c "
+          from PIL import Image
+          img = Image.open('logo.png')
+          img.save('UbutelVoIP.ico', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])
+          "
+
+      - name: Build EXE
+        run: pyinstaller UbutelVoIP_windows.spec --noconfirm
+
+      - name: Zip EXE
+        run: Compress-Archive -Path dist\UbutelVoIP\* -DestinationPath UbutelVoIP-Windows.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: UbutelVoIP-Windows.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libportaudio2 portaudio19-dev \
+            python3-tk tk-dev \
+            libasound2-dev \
+            upx-ucl
+
+      - name: Install Python dependencies
+        run: |
+          pip install \
+            pyVoIP==1.6.8 \
+            customtkinter==5.2.2 \
+            sounddevice==0.5.5 \
+            numpy==1.26.4 \
+            audioop-lts==0.2.2 \
+            python-dotenv==1.2.2 \
+            pyinstaller
+
+      - name: Build binary
+        run: pyinstaller UbutelVoIP_linux.spec --noconfirm
+
+      - name: Zip binary
+        run: cd dist && zip -r ../UbutelVoIP-Linux.zip UbutelVoIP/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: UbutelVoIP-Linux.zip
+
+  release:
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macos/UbutelVoIP-macOS.zip
+            windows/UbutelVoIP-Windows.zip
+            linux/UbutelVoIP-Linux.zip
+          generate_release_notes: true
