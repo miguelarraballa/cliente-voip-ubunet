@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 PyInstaller spec — UbutelVoIP.exe para Windows
-Genera dist\UbutelVoIP\UbutelVoIP.exe (modo onedir)
+Genera dist/UbutelVoIP/UbutelVoIP.exe (modo onedir)
 Run from the project root with:
     pyinstaller UbutelVoIP_windows.spec --noconfirm
 """
