@@ -446,19 +446,34 @@ class VoIPApp(ctk.CTk):
             self._ring_tick()
 
     def _play_ring_wav(self):
-        """Repite el archivo WAV con afplay hasta que _ringing sea False."""
+        """Repite el archivo WAV hasta que _ringing sea False (multiplataforma)."""
+        import sys
         while self._ringing:
             try:
-                proc = subprocess.Popen(
-                    ["afplay", self._ring_path],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                # Esperar fin del wav, comprobando cada 50 ms si hay que parar
-                while proc.poll() is None:
-                    if not self._ringing:
-                        proc.kill()
-                        break
+                if sys.platform == "darwin":
+                    proc = subprocess.Popen(
+                        ["afplay", self._ring_path],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    while proc.poll() is None:
+                        if not self._ringing:
+                            proc.kill()
+                            break
+                        time.sleep(0.05)
+                elif sys.platform == "win32":
+                    import winsound
+                    winsound.PlaySound(self._ring_path, winsound.SND_FILENAME)
                     time.sleep(0.05)
+                else:
+                    proc = subprocess.Popen(
+                        ["aplay", self._ring_path],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    while proc.poll() is None:
+                        if not self._ringing:
+                            proc.kill()
+                            break
+                        time.sleep(0.05)
             except Exception:
                 break
         self.after(0, lambda: self.title("Ubutel VoIP"))
