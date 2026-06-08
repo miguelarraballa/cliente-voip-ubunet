@@ -17,8 +17,8 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "1.0.4"
-APP_RELEASE = "20260605123400"
+APP_VERSION = "1.0.5"
+APP_RELEASE = "20260608183400"
 APP_AUTHOR  = "Miguel Arrabal"
 
 _STATUS_DOT = {
@@ -682,6 +682,9 @@ class VoIPApp(ctk.CTk):
         rdir = s.get("rec_folder", "")
         if rdir:
             self._rec_folder = rdir
+        import config as _cfg
+        if "audio_input"  in s: _cfg.AUDIO_INPUT  = s["audio_input"]
+        if "audio_output" in s: _cfg.AUDIO_OUTPUT = s["audio_output"]
 
     def _load_connection_settings(self):
         """Lee credenciales SIP guardadas y las aplica en el módulo config."""
@@ -706,7 +709,7 @@ class VoIPApp(ctk.CTk):
 
         win = ctk.CTkToplevel(self)
         win.title("Ajustes")
-        win.geometry("420x620")
+        win.geometry("420x720")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         self._settings_win = win
@@ -793,6 +796,62 @@ class VoIPApp(ctk.CTk):
                 lbl.configure(text=f(v)); cb(v)
             sl.configure(command=_cb)
             sl.pack(fill="x", padx=4, pady=(0, 2))
+
+        # ── Dispositivos de audio ────────────────────────────────────────────────
+        section("Dispositivos de audio")
+
+        import sounddevice as _sd
+        import config as _cfg
+
+        _DEFAULT_DEV = "(Por defecto)"
+
+        try:
+            _all_devs = _sd.query_devices()
+        except Exception:
+            _all_devs = []
+
+        _input_names  = [_DEFAULT_DEV] + [d["name"] for d in _all_devs if d["max_input_channels"] > 0]
+        _output_names = [_DEFAULT_DEV] + [d["name"] for d in _all_devs if d["max_output_channels"] > 0]
+
+        def _match_dev(names, cfg_val):
+            if cfg_val:
+                for n in names:
+                    if cfg_val.lower() in n.lower():
+                        return n
+            return _DEFAULT_DEV
+
+        _in_var  = ctk.StringVar(value=_match_dev(_input_names,  _cfg.AUDIO_INPUT))
+        _out_var = ctk.StringVar(value=_match_dev(_output_names, _cfg.AUDIO_OUTPUT))
+
+        def _on_input_change(choice):
+            val = "" if choice == _DEFAULT_DEV else choice
+            _cfg.AUDIO_INPUT = val
+            _write_settings({"audio_input": val})
+
+        def _on_output_change(choice):
+            val = "" if choice == _DEFAULT_DEV else choice
+            _cfg.AUDIO_OUTPUT = val
+            _write_settings({"audio_output": val})
+
+        _in_row = ctk.CTkFrame(at, fg_color="transparent")
+        _in_row.pack(fill="x", padx=4, pady=(2, 2))
+        ctk.CTkLabel(_in_row, text="Micrófono", width=80, anchor="w").pack(side="left")
+        ctk.CTkOptionMenu(
+            _in_row, variable=_in_var, values=_input_names,
+            command=_on_input_change, dynamic_resizing=False,
+        ).pack(side="left", fill="x", expand=True)
+
+        _out_row = ctk.CTkFrame(at, fg_color="transparent")
+        _out_row.pack(fill="x", padx=4, pady=(0, 2))
+        ctk.CTkLabel(_out_row, text="Altavoz", width=80, anchor="w").pack(side="left")
+        ctk.CTkOptionMenu(
+            _out_row, variable=_out_var, values=_output_names,
+            command=_on_output_change, dynamic_resizing=False,
+        ).pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(at, text="Los cambios de dispositivo se aplican en la próxima llamada.",
+                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w"
+                     ).pack(fill="x", padx=4, pady=(0, 4))
 
         section("Filtro de ruido (Noise gate)")
         ctk.CTkLabel(at, text="Silencia el micro por debajo del umbral.\nSube para cortar más ruido/eco.",
