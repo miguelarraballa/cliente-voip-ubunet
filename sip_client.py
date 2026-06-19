@@ -558,6 +558,7 @@ class SIPClient:
         self._rec_active: bool = False
         self._rec_path: Optional[str] = None
 
+        self._register_lock = threading.Lock()
         self._start_registration_watchdog()
 
     @property
@@ -638,17 +639,36 @@ class SIPClient:
         except Exception:
             return False
 
+    def _force_reregister(self):
+        """Envía REGISTER al servidor para que actualice el estado de presencia."""
+        if not self._phone or not self._sip_socket_ok():
+            return
+        if not self._register_lock.acquire(blocking=False):
+            return  # registro en curso, saltar
+        def _do():
+            try:
+                self._phone.sip.register()
+                logger.debug("REGISTER refrescado — presencia actualizada")
+            except Exception as e:
+                logger.warning(f"REGISTER forzado fallido: {e}")
+            finally:
+                self._register_lock.release()
+        threading.Thread(target=_do, daemon=True, name="sip-reregister").start()
+
     def _start_registration_watchdog(self):
-        """Watchdog que detecta socket SIP muerto y reconecta automáticamente."""
+        """Watchdog: detecta socket muerto y envía REGISTER cada 30 s para mantener presencia."""
         def _watch():
             while True:
-                time.sleep(60)
-                if self._status == Status.REGISTERED and not self._sip_socket_ok():
-                    logger.warning("Watchdog: socket SIP inválido — reconectando")
-                    self._phone = None
-                    self._set_status(Status.ERROR)
-                    time.sleep(2)
-                    self.connect()
+                time.sleep(30)
+                if self._status == Status.REGISTERED:
+                    if not self._sip_socket_ok():
+                        logger.warning("Watchdog: socket SIP muerto — reconectando")
+                        self._phone = None
+                        self._set_status(Status.ERROR)
+                        time.sleep(2)
+                        self.connect()
+                    else:
+                        self._force_reregister()
         threading.Thread(target=_watch, daemon=True, name="sip-watchdog").start()
 
     # ─── Llamadas ────────────────────────────────────────────────────────────────
@@ -870,6 +890,8 @@ class SIPClient:
                     self._set_status(Status.REGISTERED)
                 if self.on_call_ended:
                     self.on_call_ended()
+                # Informa al servidor de que estamos disponibles (actualiza presencia)
+                self._force_reregister()
 
         t = threading.Thread(target=monitor, daemon=True, name="call-monitor")
         t.start()
