@@ -17,8 +17,8 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "1.0.5"
-APP_RELEASE = "20260608183400"
+APP_VERSION = "1.0.6"
+APP_RELEASE = "20260619082600"
 APP_AUTHOR  = "Miguel Arrabal"
 
 _STATUS_DOT = {
@@ -57,6 +57,7 @@ class VoIPApp(ctk.CTk):
         self._incoming_caller: str = ""
         self._last_contacts_path: Optional[str] = self._contacts.last_imported_path()
         self._ringing: bool = False
+        self._ringback_playing: bool = False
         self._ring_path: Optional[str] = None  # ruta al .wav; None = bell() del sistema
         self._call_who_label: str = ""
         self._rec_folder: str = os.path.join(os.path.expanduser("~"), "ubutelbeta5")
@@ -422,13 +423,16 @@ class VoIPApp(ctk.CTk):
         self._update_status_ui(status)
         if status == Status.CALLING:
             self._show_call_panel(f"📞  Llamando a {self._dial_var.get()}…")
+            self._start_ringback()
         elif status == Status.IN_CALL:
+            self._stop_ringback()
             # Llamada saliente establecida → iniciar contador de duración
             if self._log_type == "outgoing" and self._log_start is None:
                 self._log_start = time.monotonic()
             if self._call_start is None:
                 pass  # panel ya visible
         elif status == Status.REGISTERED:
+            self._stop_ringback()
             self._stop_ring()
             self._call_panel.pack_forget()
             self._incoming_panel.pack_forget()
@@ -497,9 +501,65 @@ class VoIPApp(ctk.CTk):
         self._ringing = False
         self.title("Ubutel VoIP")
 
+    # ─── Tonos de llamada saliente ────────────────────────────────────────────────
+
+    def _start_ringback(self):
+        """Tono de retorno (ringback europeo): 400 Hz, 1 s encendido / 4 s apagado."""
+        if self._ringback_playing:
+            return
+        self._ringback_playing = True
+        threading.Thread(target=self._ringback_thread, daemon=True, name="ringback").start()
+
+    def _stop_ringback(self):
+        self._ringback_playing = False
+
+    def _ringback_thread(self):
+        import sounddevice as sd
+        import numpy as np
+        RATE, FREQ, CHUNK = 8000, 400, 160
+        t = np.linspace(0, 1.0, RATE, endpoint=False)
+        tone    = (np.sin(2 * np.pi * FREQ * t) * 12000).astype(np.int16).reshape(-1, 1)
+        silence = np.zeros((RATE * 4, 1), dtype=np.int16)
+        try:
+            with sd.OutputStream(samplerate=RATE, channels=1, dtype="int16") as stream:
+                while self._ringback_playing:
+                    for i in range(0, RATE, CHUNK):
+                        if not self._ringback_playing:
+                            break
+                        stream.write(tone[i:min(i + CHUNK, RATE)])
+                    for i in range(0, RATE * 4, CHUNK):
+                        if not self._ringback_playing:
+                            break
+                        stream.write(silence[i:min(i + CHUNK, RATE * 4)])
+        except Exception:
+            pass
+
+    def _play_busy_tone(self):
+        """Tono de ocupado europeo: 400 Hz, 0.5 s on / 0.5 s off × 3 ciclos."""
+        def _thread():
+            import sounddevice as sd
+            import numpy as np
+            RATE, FREQ = 8000, 400
+            half = RATE // 2
+            t    = np.linspace(0, 0.5, half, endpoint=False)
+            tone    = (np.sin(2 * np.pi * FREQ * t) * 12000).astype(np.int16).reshape(-1, 1)
+            silence = np.zeros((half, 1), dtype=np.int16)
+            try:
+                with sd.OutputStream(samplerate=RATE, channels=1, dtype="int16") as stream:
+                    for _ in range(3):
+                        stream.write(tone)
+                        stream.write(silence)
+            except Exception:
+                pass
+        threading.Thread(target=_thread, daemon=True, name="busy-tone").start()
+
     def _handle_call_ended(self):
+        outgoing_unanswered = (self._log_type == "outgoing" and not self._log_answered)
+        self._stop_ringback()
         self._stop_ring()
         self._finalize_log_entry()
+        if outgoing_unanswered:
+            self._play_busy_tone()
         if self._recording:
             self._sip.stop_recording()
             self._recording = False
@@ -810,8 +870,17 @@ class VoIPApp(ctk.CTk):
         except Exception:
             _all_devs = []
 
-        _input_names  = [_DEFAULT_DEV] + [d["name"] for d in _all_devs if d["max_input_channels"] > 0]
-        _output_names = [_DEFAULT_DEV] + [d["name"] for d in _all_devs if d["max_output_channels"] > 0]
+        def _unique_dev_names(devs, channel_key):
+            seen = set()
+            names = [_DEFAULT_DEV]
+            for d in devs:
+                if d[channel_key] > 0 and d["name"] not in seen:
+                    seen.add(d["name"])
+                    names.append(d["name"])
+            return names
+
+        _input_names  = _unique_dev_names(_all_devs, "max_input_channels")
+        _output_names = _unique_dev_names(_all_devs, "max_output_channels")
 
         def _match_dev(names, cfg_val):
             if cfg_val:

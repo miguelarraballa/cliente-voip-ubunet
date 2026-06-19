@@ -558,6 +558,8 @@ class SIPClient:
         self._rec_active: bool = False
         self._rec_path: Optional[str] = None
 
+        self._start_registration_watchdog()
+
     @property
     def status(self) -> Status:
         return self._status
@@ -635,6 +637,19 @@ class SIPClient:
             return bool(self._phone and self._phone.sip.s and self._phone.sip.s.fileno() != -1)
         except Exception:
             return False
+
+    def _start_registration_watchdog(self):
+        """Watchdog que detecta socket SIP muerto y reconecta automáticamente."""
+        def _watch():
+            while True:
+                time.sleep(60)
+                if self._status == Status.REGISTERED and not self._sip_socket_ok():
+                    logger.warning("Watchdog: socket SIP inválido — reconectando")
+                    self._phone = None
+                    self._set_status(Status.ERROR)
+                    time.sleep(2)
+                    self.connect()
+        threading.Thread(target=_watch, daemon=True, name="sip-watchdog").start()
 
     # ─── Llamadas ────────────────────────────────────────────────────────────────
 
