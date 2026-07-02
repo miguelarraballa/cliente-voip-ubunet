@@ -986,43 +986,67 @@ class SIPClient:
         def mic_thread():
             nonlocal rtp_seq, rtp_ts, received_rms
             hold = 0  # contador de paquetes de hold tras bajar del umbral
+            resample_state = None
+            resample_buf = b""
             try:
+                # Algunos micrófonos USB (sobre todo en Windows) no soportan
+                # capturar directamente a 8 kHz — se pide a la tasa nativa
+                # del dispositivo y se resamplea a 8 kHz con audioop.ratecv.
+                dev_info = sd.query_devices(dev_in, "input") if dev_in is not None \
+                    else sd.query_devices(kind="input")
+                mic_rate  = int(dev_info["default_samplerate"])
+                mic_block = max(1, round(CHUNK * mic_rate / RATE))
+
                 with sd.InputStream(
-                    samplerate=RATE, channels=1, dtype="int16",
-                    blocksize=CHUNK, device=dev_in, latency="low",
+                    samplerate=mic_rate, channels=1, dtype="int16",
+                    blocksize=mic_block, device=dev_in, latency="low",
                 ) as stream:
                     while call.state == CallState.ANSWERED:
-                        data, _ = stream.read(CHUNK)
-                        rms = int(np.sqrt(np.mean(data.astype(np.int32) ** 2)))
-                        ng_rms = int(32767 * 10 ** (self.noise_gate_dbfs / 20))
-
-                        if received_rms > self.echo_gate_rms:
-                            # Echo gate: interlocutor habla → atenuar micro
-                            data = (data * self.echo_gate_factor).astype(np.int16)
-                            hold = 0
-                        elif rms > ng_rms:
-                            hold = NOISE_GATE_HOLD
-                        elif hold > 0:
-                            hold -= 1
+                        raw, _ = stream.read(mic_block)
+                        raw_bytes = raw.astype(np.int16).tobytes()
+                        if mic_rate != RATE:
+                            converted, resample_state = audioop.ratecv(
+                                raw_bytes, 2, 1, mic_rate, RATE, resample_state
+                            )
                         else:
-                            data = np.zeros_like(data)
+                            converted = raw_bytes
+                        resample_buf += converted
 
-                        if self._rec_active:
-                            rec_mic_q.put(data.copy())
-                        payload = encode_mic(data)
-                        hdr = struct.pack(
-                            "!BBHII",
-                            0x80, pt,
-                            rtp_seq & 0xFFFF,
-                            rtp_ts  & 0xFFFFFFFF,
-                            rtp_ssrc,
-                        )
-                        try:
-                            out_sock.sendto(hdr + payload, out_addr)
-                        except OSError:
-                            pass
-                        rtp_seq += 1
-                        rtp_ts  += CHUNK
+                        while len(resample_buf) >= CHUNK * 2:
+                            chunk_bytes  = resample_buf[:CHUNK * 2]
+                            resample_buf = resample_buf[CHUNK * 2:]
+                            data = np.frombuffer(chunk_bytes, dtype="int16").reshape(-1, 1)
+
+                            rms = int(np.sqrt(np.mean(data.astype(np.int32) ** 2)))
+                            ng_rms = int(32767 * 10 ** (self.noise_gate_dbfs / 20))
+
+                            if received_rms > self.echo_gate_rms:
+                                # Echo gate: interlocutor habla → atenuar micro
+                                data = (data * self.echo_gate_factor).astype(np.int16)
+                                hold = 0
+                            elif rms > ng_rms:
+                                hold = NOISE_GATE_HOLD
+                            elif hold > 0:
+                                hold -= 1
+                            else:
+                                data = np.zeros_like(data)
+
+                            if self._rec_active:
+                                rec_mic_q.put(data.copy())
+                            payload = encode_mic(data)
+                            hdr = struct.pack(
+                                "!BBHII",
+                                0x80, pt,
+                                rtp_seq & 0xFFFF,
+                                rtp_ts  & 0xFFFFFFFF,
+                                rtp_ssrc,
+                            )
+                            try:
+                                out_sock.sendto(hdr + payload, out_addr)
+                            except OSError:
+                                pass
+                            rtp_seq += 1
+                            rtp_ts  += CHUNK
             except Exception as e:
                 logger.error(f"Error audio mic: {e}")
 
