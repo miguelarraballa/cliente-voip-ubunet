@@ -17,8 +17,8 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "1.0.8"
-APP_RELEASE = "20260702121800"
+APP_VERSION = "1.0.9"
+APP_RELEASE = "20260847084700"
 APP_AUTHOR  = "Miguel Arrabal"
 
 _STATUS_DOT = {
@@ -373,6 +373,9 @@ class VoIPApp(ctk.CTk):
             self._sip.stop_recording()
             self._recording = False
         self._sip.hangup()
+        # sip.hangup() no dispara on_call_ended (para evitar doble callback),
+        # así que hay que cerrar la entrada del historial aquí explícitamente.
+        self._finalize_log_entry()
         self._call_panel.pack_forget()
         self._call_start = None
 
@@ -429,6 +432,7 @@ class VoIPApp(ctk.CTk):
             # Llamada saliente establecida → iniciar contador de duración
             if self._log_type == "outgoing" and self._log_start is None:
                 self._log_start = time.monotonic()
+                self._log_answered = True
             if self._call_start is None:
                 pass  # panel ya visible
         elif status == Status.REGISTERED:
@@ -922,31 +926,47 @@ class VoIPApp(ctk.CTk):
                      text_color="gray", font=ctk.CTkFont(size=10), anchor="w"
                      ).pack(fill="x", padx=4, pady=(0, 4))
 
-        section("Filtro de ruido (Noise gate)")
-        ctk.CTkLabel(at, text="Silencia el micro por debajo del umbral.\nSube para cortar más ruido/eco.",
-                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w"
+        section("Ruido de fondo")
+        ctk.CTkLabel(at,
+                     text="Corta el micro cuando no estás hablando, para que no se envíe\n"
+                          "ruido de fondo. Si se sigue oyendo ruido o eco de fondo, sube el filtrado.",
+                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w", justify="left"
                      ).pack(fill="x", padx=4)
-        slider_row("Umbral", -50, -25, self._sip.noise_gate_dbfs,
-                   lambda v: f"{v:.1f} dBFS",
+        slider_row("Nivel de filtrado", -50, -25, self._sip.noise_gate_dbfs,
+                   lambda v: f"{round((v + 50) / 25 * 100)} %",
                    lambda v: (setattr(self._sip, "noise_gate_dbfs", round(v, 1)),
                                _write_settings({"noise_gate_dbfs": round(v, 1)})))
-        ctk.CTkLabel(at, text="← −50 permisivo   −25 agresivo →",
+        ctk.CTkLabel(at, text="← Capta todo (más ruido/eco)      Corta más ruido/eco →",
                      text_color="gray", font=ctk.CTkFont(size=10)
                      ).pack(pady=(0, 2))
 
-        section("Eco gate")
-        ctk.CTkLabel(at, text="Atenúa el micro cuando el interlocutor habla fuerte.",
-                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w"
+        section("Eco al usar altavoces")
+        ctk.CTkLabel(at,
+                     text="Con altavoces (sin auriculares) el micro puede captar el sonido que\n"
+                          "sale de ellos y la otra persona se oye a sí misma con retardo (eco).\n"
+                          "Esto baja el volumen del micro automáticamente mientras suena el altavoz.",
+                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w", justify="left"
                      ).pack(fill="x", padx=4)
-        slider_row("Sensibilidad (RMS >)", 400, 4000, self._sip.echo_gate_rms,
-                   lambda v: f"{int(v)} RMS",
+        slider_row("Facilidad para corregir el eco", 400, 4000, self._sip.echo_gate_rms,
+                   lambda v: f"{round(100 - (v - 400) / 3600 * 100)} %",
                    lambda v: (setattr(self._sip, "echo_gate_rms", int(v)),
                                _write_settings({"echo_gate_rms": int(v)})))
-        slider_row("Atenuación del micro", 2, 50,
+        ctk.CTkLabel(at, text="← Corrige con más facilidad      Corrige solo con altavoz muy alto →",
+                     text_color="gray", font=ctk.CTkFont(size=10)
+                     ).pack(pady=(0, 2))
+        slider_row("Cuánto se baja el micro al corregir", 2, 50,
                    round(self._sip.echo_gate_factor * 100),
                    lambda v: f"{int(v)} %",
                    lambda v: (setattr(self._sip, "echo_gate_factor", round(v / 100, 3)),
                                _write_settings({"echo_gate_factor": round(v / 100, 3)})))
+        ctk.CTkLabel(at, text="← Lo baja poco      Lo baja mucho →",
+                     text_color="gray", font=ctk.CTkFont(size=10)
+                     ).pack(pady=(0, 2))
+        ctk.CTkLabel(at,
+                     text="Si sigues oyendo eco, sube ambos valores. La forma más eficaz de\n"
+                          "eliminarlo del todo es usar auriculares en vez de altavoces.",
+                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w", justify="left"
+                     ).pack(fill="x", padx=4, pady=(0, 2))
 
         # ── Tono de llamada ──────────────────────────────────────────────────
         section("Tono de llamada")

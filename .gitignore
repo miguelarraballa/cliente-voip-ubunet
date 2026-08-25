@@ -31,4 +31,7 @@ __pycache__/
 # Logs
 *.log
 
+# Documentación técnica interna (generada para revisión, no distribuir)
+DOCUMENTACION_TECNICA.md
+
 
