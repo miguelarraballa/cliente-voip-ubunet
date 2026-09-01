@@ -17,8 +17,8 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "1.0.9"
-APP_RELEASE = "20260847084700"
+APP_VERSION = "1.1.0"
+APP_RELEASE = "20260901201700"
 APP_AUTHOR  = "Miguel Arrabal"
 
 _STATUS_DOT = {
@@ -773,7 +773,7 @@ class VoIPApp(ctk.CTk):
 
         win = ctk.CTkToplevel(self)
         win.title("Ajustes")
-        win.geometry("420x720")
+        win.geometry("420x820")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         self._settings_win = win
@@ -925,6 +925,107 @@ class VoIPApp(ctk.CTk):
         ctk.CTkLabel(at, text="Los cambios de dispositivo se aplican en la próxima llamada.",
                      text_color="gray", font=ctk.CTkFont(size=10), anchor="w"
                      ).pack(fill="x", padx=4, pady=(0, 4))
+
+        # ── Comprobar micrófono / altavoz ────────────────────────────────────
+        section("Comprobar dispositivos")
+        ctk.CTkLabel(at,
+                     text="Útil si tienes auriculares USB y no estás seguro de que el\n"
+                          "driver los esté usando correctamente en este equipo.",
+                     text_color="gray", font=ctk.CTkFont(size=10), anchor="w", justify="left"
+                     ).pack(fill="x", padx=4)
+
+        _mic_test = {"active": False, "level": 0.0, "error": None}
+
+        def _mic_test_loop():
+            import sounddevice as _sd2
+            import numpy as _np2
+            dev_in = self._sip._find_audio_device(_cfg.AUDIO_INPUT, "input")
+            try:
+                dev_info = _sd2.query_devices(dev_in, "input") if dev_in is not None \
+                    else _sd2.query_devices(kind="input")
+                rate  = int(dev_info["default_samplerate"])
+                block = max(1, rate // 20)  # ~50 ms
+                with _sd2.InputStream(samplerate=rate, channels=1, dtype="float32",
+                                      blocksize=block, device=dev_in, latency="low") as stream:
+                    while _mic_test["active"]:
+                        data, _ = stream.read(block)
+                        rms = float(_np2.sqrt(_np2.mean(_np2.square(data))))
+                        _mic_test["level"] = min(1.0, rms * 6)
+            except Exception as e:
+                _mic_test["error"] = str(e)
+            finally:
+                _mic_test["active"] = False
+
+        def _poll_mic_level():
+            if not win.winfo_exists():
+                return
+            if _mic_test["active"]:
+                mic_level_bar.set(_mic_test["level"])
+                win.after(50, _poll_mic_level)
+            else:
+                mic_level_bar.set(0.0)
+                mic_test_btn.configure(text="🎤  Probar micrófono")
+                err = _mic_test.pop("error", None)
+                if err:
+                    messagebox.showerror("Micrófono",
+                                          f"No se pudo abrir el micrófono:\n{err}", parent=win)
+
+        def _stop_mic_test():
+            _mic_test["active"] = False
+
+        def _toggle_mic_test():
+            if _mic_test["active"]:
+                _stop_mic_test()
+                return
+            _mic_test["active"] = True
+            _mic_test["level"]  = 0.0
+            _mic_test["error"]  = None
+            mic_test_btn.configure(text="⏹  Detener prueba")
+            threading.Thread(target=_mic_test_loop, daemon=True, name="mic-test").start()
+            win.after(50, _poll_mic_level)
+
+        def _play_test_tone():
+            import sounddevice as _sd2
+            import numpy as _np2
+            dev_out = self._sip._find_audio_device(_cfg.AUDIO_OUTPUT, "output")
+            try:
+                dev_info = _sd2.query_devices(dev_out, "output") if dev_out is not None \
+                    else _sd2.query_devices(kind="output")
+                rate = int(dev_info["default_samplerate"])
+                dur  = 0.6
+                t    = _np2.linspace(0, dur, int(rate * dur), endpoint=False)
+                tone = 0.3 * _np2.sin(2 * _np2.pi * 440 * t)
+                fade = min(len(tone) // 10, int(rate * 0.02))
+                if fade > 0:
+                    env = _np2.ones_like(tone)
+                    env[:fade]  = _np2.linspace(0, 1, fade)
+                    env[-fade:] = _np2.linspace(1, 0, fade)
+                    tone *= env
+                _sd2.play(tone.astype(_np2.float32), samplerate=rate, device=dev_out)
+            except Exception as e:
+                messagebox.showerror("Altavoz",
+                                      f"No se pudo reproducir el pitido de prueba:\n{e}",
+                                      parent=win)
+
+        test_row = ctk.CTkFrame(at, fg_color="transparent")
+        test_row.pack(fill="x", padx=4, pady=(4, 2))
+        mic_test_btn = ctk.CTkButton(test_row, text="🎤  Probar micrófono", width=150,
+                                      command=_toggle_mic_test)
+        mic_test_btn.pack(side="left")
+        mic_level_bar = ctk.CTkProgressBar(test_row)
+        mic_level_bar.set(0)
+        mic_level_bar.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        ctk.CTkButton(at, text="🔊  Probar altavoz (reproducir pitido)",
+                      command=_play_test_tone
+                      ).pack(fill="x", padx=4, pady=(2, 4))
+
+        _orig_settings_destroy = win.destroy
+        def _destroy_settings():
+            _stop_mic_test()
+            _orig_settings_destroy()
+        win.destroy = _destroy_settings
+        win.protocol("WM_DELETE_WINDOW", _destroy_settings)
 
         section("Ruido de fondo")
         ctk.CTkLabel(at,
