@@ -17,8 +17,8 @@ from call_log import CallLog, TYPE_ICONS, TYPE_LABELS
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-APP_VERSION = "1.1.0"
-APP_RELEASE = "20260901201700"
+APP_VERSION = "1.1.1"
+APP_RELEASE = "202609012110100"
 APP_AUTHOR  = "Miguel Arrabal"
 
 _STATUS_DOT = {
@@ -773,7 +773,7 @@ class VoIPApp(ctk.CTk):
 
         win = ctk.CTkToplevel(self)
         win.title("Ajustes")
-        win.geometry("420x820")
+        win.geometry("420x720")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         self._settings_win = win
@@ -841,7 +841,9 @@ class VoIPApp(ctk.CTk):
         # ════════════════════════════════════════════════════════════════════
         # PESTAÑA AUDIO
         # ════════════════════════════════════════════════════════════════════
-        at = tabs.tab("Audio")
+        at_tab = tabs.tab("Audio")
+        at = ctk.CTkScrollableFrame(at_tab, fg_color="transparent")
+        at.pack(fill="both", expand=True)
 
         def section(text):
             ctk.CTkLabel(at, text=text, font=ctk.CTkFont(weight="bold"), anchor="w"
